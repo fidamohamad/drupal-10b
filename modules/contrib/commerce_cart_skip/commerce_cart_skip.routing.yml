@@ -1,0 +1,46 @@
+entity.commerce_cart_skip_rule.collection:
+  path: '/admin/commerce/config/products/commerce_cart_skip'
+  defaults:
+    _entity_list: 'commerce_cart_skip_rule'
+    _title: 'Commerce cart skip rules'
+  requirements:
+    _permission: 'administer commerce cart skip rules'
+
+entity.commerce_cart_skip_rule.add_form:
+  path: '/admin/commerce/config/products/commerce_cart_skip/add'
+  defaults:
+    _entity_form: 'commerce_cart_skip_rule.add'
+    _title: 'Add commerce cart skip rule'
+  requirements:
+    _permission: 'administer commerce cart skip rules'
+
+entity.commerce_cart_skip_rule.edit_form:
+  path: '/admin/commerce/config/products/commerce_cart_skip/{commerce_cart_skip_rule}'
+  defaults:
+    _entity_form: 'commerce_cart_skip_rule.edit'
+    _title: 'Edit commerce cart skip rule'
+  requirements:
+    _permission: 'administer commerce cart skip rules'
+
+entity.commerce_cart_skip_rule.delete_form:
+  path: '/admin/commerce/config/products/commerce_cart_skip/{commerce_cart_skip_rule}/delete'
+  defaults:
+    _entity_form: 'commerce_cart_skip_rule.delete'
+    _title: 'Delete commerce cart skip rule'
+  requirements:
+    _permission: 'administer commerce cart skip rules'
+
+commerce_cart_skip.purchased:
+  path: '/product/purchased/{commerce_cart_skip_rule}/{commerce_order}'
+  defaults:
+    _title: 'Purchased'
+    _controller: '\Drupal\commerce_cart_skip\Controller\CommerceCartSkipPurchasedController::purchased'
+  requirements:
+    _entity_access: 'commerce_order.view'
+    commerce_order: \d+
+  options:
+    parameters:
+      commerce_cart_skip_rule: 
+        type: entity:commerce_cart_skip_rule       
+      commerce_order: 
+        type: entity:commerce_order        

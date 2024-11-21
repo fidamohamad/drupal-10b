@@ -1,0 +1,12 @@
+name: Commerce Cart Skip
+type: module
+description: Allow skipping the cart and automatically creating an order for certain situations.
+core_version_requirement: ^8 || ^9 || ^10
+package: Commerce (contrib)
+dependencies:
+  - commerce:commerce_cart
+
+# Information added by Drupal.org packaging script on 2023-11-03
+version: '1.0.0'
+project: 'commerce_cart_skip'
+datestamp: 1699013740

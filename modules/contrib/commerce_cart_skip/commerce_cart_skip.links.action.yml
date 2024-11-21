@@ -1,0 +1,5 @@
+entity.commerce_cart_skip_rule.add_form:
+  route_name: 'entity.commerce_cart_skip_rule.add_form'
+  title: 'Add commerce cart skip rule'
+  appears_on:
+    - entity.commerce_cart_skip_rule.collection

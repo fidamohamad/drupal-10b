@@ -1,0 +1,6 @@
+entity.commerce_cart_skip_rule.collection:
+  title: 'Commerce cart skip rules'
+  parent: commerce_product.configuration
+  description: 'Administer rules allowing users to purchase products without going through the cart.'
+  route_name: entity.commerce_cart_skip_rule.collection
+  weight: 10

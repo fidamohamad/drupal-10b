@@ -1,0 +1,25 @@
+commerce_cart_skip.commerce_cart_skip_rule.*:
+  type: config_entity
+  label: "Commerce cart skip rule"
+  mapping:
+    id:
+      type: string
+      label: "ID"
+    label:
+      type: label
+      label: "Label"
+    enabled:
+      type: boolean
+      label: "Enabled"
+    conditions:
+      type: array
+      label: "Conditions"
+    order_values:
+      type: array
+      label: "Order values"
+    ui:
+      type: array
+      label: "UI text fields"
+    allow_cancel:
+      type: boolean
+      label: "Allow cancelling"

@@ -1,0 +1,334 @@
+<?php
+
+use Drupal\commerce_cart\Form\AddToCartFormInterface;
+use Drupal\commerce_order\Entity\Order;
+use Drupal\commerce_order\Entity\OrderItem;
+use Drupal\commerce_price\Price;
+use Drupal\commerce_product\Entity\ProductVariation;
+use Drupal\commerce_product\Entity\ProductVariationInterface;
+use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Url;
+use Drupal\profile\Entity\Profile;
+use Drupal\user\Entity\User;
+use Symfony\Component\HttpFoundation\RedirectResponse;
+
+function commerce_cart_skip_form_alter(&$form, FormStateInterface $form_state, $form_id) {
+  if ($form_state->getBuildInfo()['callback_object'] instanceof AddToCartFormInterface) {
+    commerce_cart_skip_form_alter_add_to_cart($form, $form_state);
+  }
+}
+
+function commerce_cart_skip_get_rules() {
+  $storage = Drupal::entityTypeManager()
+    ->getStorage('commerce_cart_skip_rule');
+  $commerce_cart_skip_rules = $storage->loadByProperties(['enabled' => TRUE]);
+  return $commerce_cart_skip_rules;
+}
+
+function commerce_cart_skip_can_skip($rule, ProductVariationInterface $productVariation, $account) {
+  $conditions = [];
+
+  if (isset($rule->get('conditions')['commerce_product_variation_type']) && $rule->get('conditions')['commerce_product_variation_type'] != '') {
+    $conditions['commerce_product_variation_type'] = $productVariation->bundle() == $rule->get('conditions')['commerce_product_variation_type'];
+  }
+
+  if (isset($rule->get('conditions')['commerce_product_type']) && $rule->get('conditions')['commerce_product_type'] != '') {
+    $conditions['commerce_product_type'] = $productVariation->getProduct()
+        ->bundle() == $rule->get('conditions')['commerce_product_type'];
+  }
+
+  if (isset($rule->get('conditions')['price']) && !empty($rule->get('conditions')['price']) && $productVariation->getPrice()) {
+    $conditions['price'] = $productVariation->getPrice()
+        ->getNumber() == $rule->get('conditions')['price']['number'];
+  }
+
+  if (isset($rule->get('conditions')['authenticated']) && $rule->get('conditions')['authenticated']) {
+    $conditions['authenticated'] = Drupal::currentUser()->isAuthenticated();
+  }
+
+  foreach ($conditions as $value) {
+    if (!$value) {
+      return FALSE;
+    }
+  }
+  return TRUE;
+}
+
+function commerce_cart_skip_form_alter_add_to_cart(&$form, FormStateInterface $form_state) {
+  $selectedVariation = commerce_cart_skip_get_variation($form, $form_state);
+
+  if ($selectedVariation) {
+    $account = User::load(Drupal::currentUser()->id());
+    $rules = commerce_cart_skip_get_rules();
+    foreach ($rules as $rule) {
+      if (!commerce_cart_skip_can_skip($rule, $selectedVariation, $account)) {
+        continue;
+      }
+      $alreadyPurchased = commerce_cart_skip_user_has_purchased_variation($account, $selectedVariation);
+
+      $context = [
+        'rule' => $rule,
+        'selectedVariation' => $selectedVariation,
+        'account' => $account,
+      ];
+      Drupal::moduleHandler()
+        ->alter(['commerce_cart_skip_already_purchased'], $alreadyPurchased, $context);
+
+      unset($form['quantity']);
+
+      if ($alreadyPurchased) {
+        commerce_cart_skip_form_alter_add_to_cart_bought($rule, $form, $form_state);
+      }
+      else {
+        commerce_cart_skip_form_alter_add_to_cart_buy($rule, $form, $form_state);
+      }
+    }
+  }
+}
+
+function commerce_cart_skip_get_order($form, $form_state) {
+  $selectedVariation = commerce_cart_skip_get_variation($form, $form_state);
+  $account = User::load(Drupal::currentUser()->id());
+  $ids = commerce_cart_skip_user_has_purchased_variation($account, $selectedVariation, TRUE);
+  $orderItem = OrderItem::load($ids[0]);
+  return $orderItem->getOrder();
+}
+
+function commerce_cart_skip_form_alter_add_to_cart_bought($rule, &$form, FormStateInterface $form_state) {
+  $form['bought_message'] = [
+    '#weight' => 25,
+    '#markup' => $rule->get('ui')['button_bought'] ?? 'Already purchased.',
+  ];
+
+  $order = commerce_cart_skip_get_order($form, $form_state);
+  if ($order) {
+    $url = Url::fromRoute('entity.commerce_order.user_view', [
+      'commerce_order' => $order->id(),
+      'user' => $order->getCustomerId(),
+    ], [])->toString();
+
+    $form['bought_order_link'] = [
+      '#weight' => 25,
+      '#markup' => '<p><a class="button" href="' . $url . '" target="_blank">' . t($rule->get('ui')['bought_link_text'] ?? 'View order') . '</a></p>',
+    ];
+  }
+
+  if ($rule->get('allow_cancel') && $rule->get('allow_cancel') == 1) {
+    $form['actions']['submit-cancel']['#type'] = 'submit';
+    $form['actions']['submit-cancel']['#value'] = t($rule->get('ui')['cancel_button'] ?? 'Cancel purchase');
+    $form['actions']['submit-cancel']['#submit'] = ['commerce_cart_skip_cancel'];
+
+    $form['actions']['submit-cancel']['#limit_validation_errors'] = [['edit_quantity']];
+  }
+
+  if (Drupal::moduleHandler()->moduleExists('commerce_cart_webform')) {
+    commerce_cart_webform_remove_extended_fields($form);
+  }
+
+  unset($form['actions']['submit']);
+}
+
+function commerce_cart_skip_set_form_submit(&$form, $form_state, $function_name) {
+  foreach (array_keys($form['actions']) as $action) {
+    if ($action != 'preview' && isset($form['actions'][$action]['#type']) && $form['actions'][$action]['#type'] === 'submit') {
+      if (Drupal::moduleHandler()
+          ->moduleExists('commerce_cart_webform') && commerce_cart_webform_has_extended_form($form)) {
+        // We tell the other module to commerce_cart_skip_submit after it does its thing.
+        // There may be a more elegant way to do this.
+        $form_state->set('commerce_cart_skip_submit', TRUE);
+      }
+      else {
+        $form['actions'][$action]['#submit'] = [$function_name];
+      }
+    }
+  }
+}
+
+function commerce_cart_skip_form_alter_add_to_cart_buy($rule, &$form, FormStateInterface $form_state) {
+  // Don't do it if another module has hidden the submit
+  if ($form['actions']['submit']['#type'] == 'hidden') {
+    return;
+  }
+
+  $form['actions']['submit']['#value'] = t($rule->get('ui')['button_buy']);
+  unset($form['quantity']);
+
+  $showTerms = !isset($form['commerce_stock_notifications']);
+
+  if ($showTerms && isset($rule->get('ui')['terms_text'])) {
+    if (isset($rule->get('ui')['terms_link'])) {
+      $form['skip_terms'] = [
+        '#weight' => 45,
+        '#markup' => '<a  class="terms" href="' . $rule->get('ui')['terms_link'] . '" target="_blank">' . t($rule->get('ui')['terms_text']) . '</a>',
+      ];
+    }
+    else {
+      $form['skip_terms'] = [
+        '#weight' => 45,
+        '#markup' => '<p  class="terms">' . $rule->get('ui')['terms_text'] . '</p>',
+      ];
+    }
+  }
+
+  $form_state->set('skip_rule', $rule);
+
+  commerce_cart_skip_set_form_submit($form, $form_state, 'commerce_cart_skip_submit');
+}
+
+function commerce_cart_skip_get_variation($form, FormStateInterface $form_state) {
+  $form_data = $form_state->getStorage();
+
+  if (!empty($form_data['selected_variation'])) {
+    return ProductVariation::load($form_data['selected_variation']);
+  }
+  else {
+    return $form_state->getFormObject()->getEntity()->getPurchasedEntity();
+  }
+  return NULL;
+}
+
+function commerce_cart_skip_cancel(array $form, FormStateInterface $form_state) {
+  $rule = $form_state->get('skip_rule');
+  $selectedVariation = commerce_cart_skip_get_variation($form, $form_state);
+  $order = commerce_cart_skip_get_order($form, $form_state);
+  if ($order->getState()->isTransitionAllowed('cancel')) {
+    $order->getState()->applyTransitionById('cancel');
+    $order->save();
+    Drupal::messenger()->addMessage(t("Order cancelled."));
+  }
+  else {
+    Drupal::messenger()
+      ->addMessage(t("Error, cannot cancel. Contact the site administrator."));
+    return;
+  }
+}
+
+function commerce_cart_skip_submit(array &$form, FormStateInterface $form_state) {
+  $rule = $form_state->get('skip_rule');
+  $selectedVariation = commerce_cart_skip_get_variation($form, $form_state);
+  if (!$selectedVariation) {
+    return;
+  }
+
+  $account = User::load(Drupal::currentUser()->id());
+
+  $order_item = commerce_cart_skip_create_order_get_item($rule, $selectedVariation, $account);
+
+  // Pass order item to form element for use by other module.
+  $form['order_item'] = $order_item;
+
+  $order = $order_item->getOrder();
+
+  if ($order_item && $order) {
+    if ($rule->get('ui')['success_result'] == 'message' && isset($rule->get('ui')['message_bought'])) {
+      // Show same page
+      Drupal::messenger()->addMessage(t($rule->get('ui')['message_bought']));
+      return;
+    }
+    else {
+      // Redirect to confirmation page
+      $destination = '/product/purchased/' . $rule->id() . '/' . $order->id();
+      Drupal::service('request_stack')
+        ->getCurrentRequest()->query->set('destination', $destination);
+      return new RedirectResponse($destination);
+    }
+  }
+  else {
+    Drupal::messenger()
+      ->addMessage($rule->get('ui')['message_error'] ?? 'Could not buy.');
+  }
+  return;
+}
+
+/**
+ * @param $rule
+ * @param \Drupal\commerce_product\Entity\ProductVariation $productVariation
+ * @param $account
+ * @param $returnOrderItem
+ *
+ * @return \Drupal\commerce_order\Entity\OrderItem|\Drupal\Core\Entity\ContentEntityBase|\Drupal\Core\Entity\EntityBase|\Drupal\Core\Entity\EntityInterface|false
+ * @throws \Drupal\Core\Entity\EntityStorageException
+ */
+function commerce_cart_skip_create_order_get_item($rule, ProductVariation $productVariation, $account) {
+  if (!commerce_cart_skip_can_skip($rule, $productVariation, $account)) {
+    return FALSE;
+  }
+
+  // Create order item for this variation
+  $orderItem = OrderItem::create([
+    'type' => $rule->get('order_values')['order_item_type'] ?? 'default',
+    'quantity' => $rule->get('order_values')['quantity'] ?? 1,
+    'unit_price' => $rule->get('order_values')['price'] ?? new Price('0.00', 'GBP'),
+    'purchased_entity' => $productVariation,
+  ]);
+  $orderItem->save();
+
+  // Create order for user
+  $order = Order::create([
+    'type' => $rule->get('order_values')['order_type'] ?? 'default',
+    'state' => 'draft',
+    'mail' => $account->getEmail(),
+    'uid' => $account->id(),
+    'store_id' => Drupal::service('commerce_store.current_store')
+      ->getStore()
+      ->id(),
+    'order_items' => [$orderItem],
+    'created' => Drupal::time()->getCurrentTime(),
+    'billing_profile' => commerce_cart_skip_get_billing_profile($account),
+  ]);
+  $order->save();
+
+  if ($order->getState()->isTransitionAllowed('place')) {
+    $order->getState()->applyTransitionById('place');
+    $order->save();
+  }
+
+  if ($order->getState()->isTransitionAllowed('completed')) {
+    $order->getState()->applyTransitionById('completed');
+    $order->save();
+  }
+
+  if ($order) {
+    $orderItem->order_id->entity = $order;
+    $orderItem->save();
+  }
+
+  return $orderItem;
+}
+
+function commerce_cart_skip_get_billing_profile($account) {
+  $profile = Drupal::entityTypeManager()
+    ->getStorage('profile')
+    ->loadByUser($account, 'customer');
+
+  if (!$profile) {
+    $store = Drupal::service('commerce_store.current_store')->getStore();
+    /** @var \Drupal\profile\Entity\ProfileInterface $profile */
+    $profile = Profile::create([
+      'type' => 'customer',
+      'uid' => $account->id(),
+      'address' => $store->getAddress(),
+    ]);
+    $profile->save();
+  }
+
+  return $profile;
+}
+
+function commerce_cart_skip_user_has_purchased_variation($account, ProductVariation $productVariation, $returnIds = FALSE) {
+  $query = Drupal::database()->select('commerce_order_item', 'i');
+  $query->join('commerce_order', 'o', 'i.order_id = o.order_id');
+  $query->fields('i', ['order_item_id'])
+    ->condition('i.purchased_entity', $productVariation->id(), '=')
+    ->condition('o.uid', $account->id(), '=')
+    ->condition('o.state', 'completed')
+    ->condition('i.quantity', 0, ">")
+    ->distinct();
+  $ids = $query->execute()->fetchCol();
+  if ($returnIds) {
+    return $ids;
+  }
+  else {
+    return count($ids) > 0;
+  }
+}
